@@ -7,15 +7,22 @@ import com.comphenix.protocol.events.ListenerPriority;
 import com.comphenix.protocol.events.PacketAdapter;
 import com.comphenix.protocol.events.PacketEvent;
 import org.bukkit.Bukkit;
+import org.bukkit.block.Block;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.Listener;
+import org.bukkit.event.block.BlockExplodeEvent;
+import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.UUID;
 
-public final class LagFixPlugin extends JavaPlugin {
+public final class LagFixPlugin extends JavaPlugin implements Listener {
 
     private final HashMap<UUID, PacketCounter> packetCounters = new HashMap<>();
     private ProtocolManager protocolManager;
@@ -31,6 +38,7 @@ public final class LagFixPlugin extends JavaPlugin {
         }
 
         protocolManager = ProtocolLibrary.getProtocolManager();
+        Bukkit.getPluginManager().registerEvents(this, this);
         registerWindowClickListener();
         startCounterResetTask();
 
@@ -111,6 +119,36 @@ public final class LagFixPlugin extends JavaPlugin {
                 }
             }
         }, 20L, 20L);
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
+    public void onEntityExplodeHigh(EntityExplodeEvent event) {
+        preventExplosionBlockDamage(event.blockList());
+        event.setYield(0.0f);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = false)
+    public void onEntityExplodeMonitor(EntityExplodeEvent event) {
+        preventExplosionBlockDamage(event.blockList());
+        event.setYield(0.0f);
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
+    public void onBlockExplodeHigh(BlockExplodeEvent event) {
+        preventExplosionBlockDamage(event.blockList());
+        event.setYield(0.0f);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = false)
+    public void onBlockExplodeMonitor(BlockExplodeEvent event) {
+        preventExplosionBlockDamage(event.blockList());
+        event.setYield(0.0f);
+    }
+
+    private void preventExplosionBlockDamage(List<Block> blocks) {
+        if (!blocks.isEmpty()) {
+            blocks.clear();
+        }
     }
 
     private static final class PacketCounter {

@@ -4,3 +4,6 @@ kick-player: true
 boss-timer:
   interval-millis: 3600000
   next-spawn-millis: 0
+
+whitelist-pickaxe:
+  blocks: []

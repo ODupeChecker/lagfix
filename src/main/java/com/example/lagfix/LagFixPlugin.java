@@ -9,32 +9,41 @@ import com.comphenix.protocol.events.PacketEvent;
 import me.clip.placeholderapi.expansion.PlaceholderExpansion;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
+import org.bukkit.Material;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.block.Block;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
+import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockExplodeEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
-import org.bukkit.entity.Player;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.plugin.java.JavaPlugin;
 
+import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 public final class LagFixPlugin extends JavaPlugin implements Listener {
 
     private static final String BOSS_SPAWN_COMMAND = "mm mobs spawn HPC_GRANDWARDEN:1 1 worldo12,-11,67,-214,0,0";
     private static final long DEFAULT_BOSS_INTERVAL_MILLIS = 60L * 60L * 1000L;
     private static final Pattern DURATION_PATTERN = Pattern.compile("^(\\d+(?:\\.\\d+)?)h$", Pattern.CASE_INSENSITIVE);
+    private static final String WHITELIST_PICKAXE_MARKER = "ᴄᴀɴ ᴏɴʟʏ ᴍɪɴᴇ ɢᴇɴꜱ";
+    private static final String WHITELIST_PICKAXE_CONFIG_PATH = "whitelist-pickaxe.blocks";
 
     private final HashMap<UUID, PacketCounter> packetCounters = new HashMap<>();
     private ProtocolManager protocolManager;
@@ -80,10 +89,18 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        if (!command.getName().equalsIgnoreCase("bosstimer")) {
-            return false;
+        if (command.getName().equalsIgnoreCase("bosstimer")) {
+            return handleBossTimerCommand(sender, args);
         }
 
+        if (command.getName().equalsIgnoreCase("whitelist")) {
+            return handleWhitelistCommand(sender, args);
+        }
+
+        return false;
+    }
+
+    private boolean handleBossTimerCommand(CommandSender sender, String[] args) {
         if (!sender.isOp()) {
             sender.sendMessage(ChatColor.RED + "Only operators can use this command.");
             return true;
@@ -121,6 +138,52 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
         }
 
         sender.sendMessage(ChatColor.YELLOW + "Usage: /bosstimer set <1h/2h/1.5h/3h> or /bosstimer spawn");
+        return true;
+    }
+
+    private boolean handleWhitelistCommand(CommandSender sender, String[] args) {
+        if (!sender.isOp()) {
+            sender.sendMessage(ChatColor.RED + "Only operators can use this command.");
+            return true;
+        }
+
+        if (args.length != 3 || !args[0].equalsIgnoreCase("pickaxe")) {
+            sender.sendMessage(ChatColor.YELLOW + "Usage: /whitelist pickaxe <add|remove> <block>");
+            return true;
+        }
+
+        Material material = Material.matchMaterial(args[2]);
+        if (material == null || !material.isBlock()) {
+            sender.sendMessage(ChatColor.RED + "Unknown block: " + args[2]);
+            return true;
+        }
+
+        Set<String> whitelist = getWhitelistedBlockNames();
+        String materialName = material.name();
+
+        if (args[1].equalsIgnoreCase("add")) {
+            if (!whitelist.add(materialName)) {
+                sender.sendMessage(ChatColor.YELLOW + materialName + " is already whitelisted for whitelist pickaxes.");
+                return true;
+            }
+
+            saveWhitelistedBlockNames(whitelist);
+            sender.sendMessage(ChatColor.GREEN + "Added " + materialName + " to the whitelist pickaxe block list.");
+            return true;
+        }
+
+        if (args[1].equalsIgnoreCase("remove")) {
+            if (!whitelist.remove(materialName)) {
+                sender.sendMessage(ChatColor.YELLOW + materialName + " is not in the whitelist pickaxe block list.");
+                return true;
+            }
+
+            saveWhitelistedBlockNames(whitelist);
+            sender.sendMessage(ChatColor.GREEN + "Removed " + materialName + " from the whitelist pickaxe block list.");
+            return true;
+        }
+
+        sender.sendMessage(ChatColor.YELLOW + "Usage: /whitelist pickaxe <add|remove> <block>");
         return true;
     }
 
@@ -268,6 +331,23 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
                 + (minutes == 1L ? " minute" : " minutes");
     }
 
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onBlockBreak(BlockBreakEvent event) {
+        Player player = event.getPlayer();
+        ItemStack item = player.getInventory().getItemInMainHand();
+        if (!isWhitelistPickaxe(item)) {
+            return;
+        }
+
+        Material brokenBlockType = event.getBlock().getType();
+        if (getWhitelistedBlockNames().contains(brokenBlockType.name())) {
+            return;
+        }
+
+        event.setCancelled(true);
+        player.sendMessage(ChatColor.RED + "This whitelist pickaxe can only mine whitelisted blocks.");
+    }
+
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     public void onEntityExplodeHigh(EntityExplodeEvent event) {
         preventExplosionBlockDamage(event.blockList());
@@ -296,6 +376,56 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
         if (!blocks.isEmpty()) {
             blocks.clear();
         }
+    }
+
+    private boolean isWhitelistPickaxe(ItemStack item) {
+        if (item == null || !item.getType().name().endsWith("_PICKAXE")) {
+            return false;
+        }
+
+        ItemMeta itemMeta = item.getItemMeta();
+        if (itemMeta == null) {
+            return false;
+        }
+
+        if (containsWhitelistMarker(itemMeta.getDisplayName())) {
+            return true;
+        }
+
+        if (!itemMeta.hasLore() || itemMeta.getLore() == null) {
+            return false;
+        }
+
+        for (String loreLine : itemMeta.getLore()) {
+            if (containsWhitelistMarker(loreLine)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean containsWhitelistMarker(String text) {
+        if (text == null || text.isEmpty()) {
+            return false;
+        }
+
+        String normalizedText = ChatColor.stripColor(ChatColor.translateAlternateColorCodes('&', text));
+        return normalizedText != null && normalizedText.contains(WHITELIST_PICKAXE_MARKER);
+    }
+
+    private Set<String> getWhitelistedBlockNames() {
+        return getConfig().getStringList(WHITELIST_PICKAXE_CONFIG_PATH).stream()
+                .map(name -> name.toUpperCase(Locale.ROOT))
+                .collect(Collectors.toSet());
+    }
+
+    private void saveWhitelistedBlockNames(Set<String> whitelist) {
+        List<String> sortedWhitelist = whitelist.stream()
+                .sorted()
+                .collect(Collectors.toCollection(ArrayList::new));
+        getConfig().set(WHITELIST_PICKAXE_CONFIG_PATH, sortedWhitelist);
+        saveConfig();
     }
 
     private static final class PacketCounter {

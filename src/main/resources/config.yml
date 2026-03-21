@@ -7,3 +7,7 @@ boss-timer:
 
 whitelist-pickaxe:
   blocks: []
+
+spawn-movement-protection:
+  enabled: true
+  region-id: spawn

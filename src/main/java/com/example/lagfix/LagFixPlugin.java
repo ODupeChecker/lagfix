@@ -6,9 +6,15 @@ import com.comphenix.protocol.ProtocolManager;
 import com.comphenix.protocol.events.ListenerPriority;
 import com.comphenix.protocol.events.PacketAdapter;
 import com.comphenix.protocol.events.PacketEvent;
+import com.sk89q.worldedit.bukkit.BukkitAdapter;
+import com.sk89q.worldguard.WorldGuard;
+import com.sk89q.worldguard.bukkit.WorldGuardPlugin;
+import com.sk89q.worldguard.protection.ApplicableRegionSet;
+import com.sk89q.worldguard.protection.managers.RegionManager;
 import me.clip.placeholderapi.expansion.PlaceholderExpansion;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
+import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.block.Block;
@@ -21,9 +27,12 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockExplodeEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
+import org.bukkit.event.player.PlayerVelocityEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.util.Vector;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -44,17 +53,21 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
     private static final Pattern DURATION_PATTERN = Pattern.compile("^(\\d+(?:\\.\\d+)?)h$", Pattern.CASE_INSENSITIVE);
     private static final String WHITELIST_PICKAXE_MARKER = "ᴄᴀɴ ᴏɴʟʏ ᴍɪɴᴇ ɢᴇɴꜱ";
     private static final String WHITELIST_PICKAXE_CONFIG_PATH = "whitelist-pickaxe.blocks";
+    private static final String SPAWN_PROTECTION_CONFIG_PATH = "spawn-movement-protection";
+    private static final Vector ZERO_VECTOR = new Vector(0, 0, 0);
 
     private final HashMap<UUID, PacketCounter> packetCounters = new HashMap<>();
     private ProtocolManager protocolManager;
     private BossTimerPlaceholder bossTimerPlaceholder;
     private volatile long bossIntervalMillis;
     private volatile long nextBossSpawnMillis;
+    private boolean worldGuardAvailable;
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
         loadBossTimerState();
+        worldGuardAvailable = setupWorldGuardSupport();
 
         if (!Bukkit.getPluginManager().isPluginEnabled("ProtocolLib")) {
             getLogger().severe("ProtocolLib is required but not found. Disabling plugin.");
@@ -348,6 +361,26 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
         player.sendMessage(ChatColor.RED + "This whitelist pickaxe can only mine whitelisted blocks.");
     }
 
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onPlayerVelocity(PlayerVelocityEvent event) {
+        Player player = event.getPlayer();
+        if (!shouldBlockExternalMovement(player.getLocation())) {
+            return;
+        }
+
+        Vector velocity = event.getVelocity();
+        if (velocity == null || velocity.lengthSquared() <= 0.0D) {
+            return;
+        }
+
+        event.setCancelled(true);
+        Bukkit.getScheduler().runTask(this, () -> {
+            if (player.isOnline() && shouldBlockExternalMovement(player.getLocation())) {
+                player.setVelocity(ZERO_VECTOR);
+            }
+        });
+    }
+
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     public void onEntityExplodeHigh(EntityExplodeEvent event) {
         preventExplosionBlockDamage(event.blockList());
@@ -426,6 +459,53 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
                 .collect(Collectors.toCollection(ArrayList::new));
         getConfig().set(WHITELIST_PICKAXE_CONFIG_PATH, sortedWhitelist);
         saveConfig();
+    }
+
+    private boolean setupWorldGuardSupport() {
+        if (!getConfig().getBoolean(SPAWN_PROTECTION_CONFIG_PATH + ".enabled", true)) {
+            getLogger().info("Spawn movement protection is disabled in config.");
+            return false;
+        }
+
+        Plugin worldGuardPlugin = Bukkit.getPluginManager().getPlugin("WorldGuard");
+        if (!(worldGuardPlugin instanceof WorldGuardPlugin)) {
+            getLogger().warning("WorldGuard not found; spawn movement protection is unavailable.");
+            return false;
+        }
+
+        String regionId = getProtectedRegionId();
+        if (regionId.isEmpty()) {
+            getLogger().warning("Spawn movement protection region id is empty; protection is disabled.");
+            return false;
+        }
+
+        getLogger().info("Spawn movement protection enabled for WorldGuard region '" + regionId + "'.");
+        return true;
+    }
+
+    private boolean shouldBlockExternalMovement(Location location) {
+        return worldGuardAvailable && isProtectedSpawnRegion(location);
+    }
+
+    private boolean isProtectedSpawnRegion(Location location) {
+        if (location == null || location.getWorld() == null) {
+            return false;
+        }
+
+        RegionManager regionManager = WorldGuard.getInstance().getPlatform().getRegionContainer()
+                .get(BukkitAdapter.adapt(location.getWorld()));
+        if (regionManager == null) {
+            return false;
+        }
+
+        ApplicableRegionSet applicableRegions = regionManager.getApplicableRegions(BukkitAdapter.asBlockVector(location));
+        String protectedRegionId = getProtectedRegionId();
+        return applicableRegions.getRegions().stream()
+                .anyMatch(region -> region.getId().equalsIgnoreCase(protectedRegionId));
+    }
+
+    private String getProtectedRegionId() {
+        return getConfig().getString(SPAWN_PROTECTION_CONFIG_PATH + ".region-id", "spawn").trim();
     }
 
     private static final class PacketCounter {

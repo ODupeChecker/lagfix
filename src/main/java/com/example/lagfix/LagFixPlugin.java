@@ -399,6 +399,10 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
             return;
         }
 
+        if (isLocationPassableForPlayer(to)) {
+            return;
+        }
+
         Vector movement = to.toVector().subtract(from.toVector());
         double movementLength = movement.length();
         if (movementLength <= 0.0D) {

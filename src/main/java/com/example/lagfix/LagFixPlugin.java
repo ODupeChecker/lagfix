@@ -27,6 +27,7 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockExplodeEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
+import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.event.player.PlayerVelocityEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
@@ -54,6 +55,7 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
     private static final String WHITELIST_PICKAXE_MARKER = "ᴄᴀɴ ᴏɴʟʏ ᴍɪɴᴇ ɢᴇɴꜱ";
     private static final String WHITELIST_PICKAXE_CONFIG_PATH = "whitelist-pickaxe.blocks";
     private static final String SPAWN_PROTECTION_CONFIG_PATH = "spawn-movement-protection";
+    private static final String FORWARD_TELEPORT_WALL_CHECK_CONFIG_PATH = "forward-teleport-wall-check";
     private static final Vector ZERO_VECTOR = new Vector(0, 0, 0);
 
     private final HashMap<UUID, PacketCounter> packetCounters = new HashMap<>();
@@ -381,6 +383,56 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
         });
     }
 
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onPlayerTeleport(PlayerTeleportEvent event) {
+        if (!getConfig().getBoolean(FORWARD_TELEPORT_WALL_CHECK_CONFIG_PATH + ".enabled", true)) {
+            return;
+        }
+
+        Location from = event.getFrom();
+        Location to = event.getTo();
+        if (from == null || to == null || from.getWorld() == null || to.getWorld() == null) {
+            return;
+        }
+
+        if (!from.getWorld().equals(to.getWorld())) {
+            return;
+        }
+
+        Vector movement = to.toVector().subtract(from.toVector());
+        double movementLength = movement.length();
+        if (movementLength <= 0.0D) {
+            return;
+        }
+
+        Vector direction = movement.normalize();
+        double step = getConfig().getDouble(FORWARD_TELEPORT_WALL_CHECK_CONFIG_PATH + ".ray-step", 0.2D);
+        if (step <= 0.0D) {
+            step = 0.2D;
+        }
+
+        Location lastSafe = from.clone();
+        boolean hitWall = false;
+
+        for (double distance = step; distance <= movementLength; distance += step) {
+            Location sample = from.clone().add(direction.clone().multiply(distance));
+            if (!isLocationPassableForPlayer(sample)) {
+                hitWall = true;
+                break;
+            }
+            lastSafe = sample;
+        }
+
+        if (!hitWall) {
+            return;
+        }
+
+        Location adjustedDestination = lastSafe.clone();
+        adjustedDestination.setYaw(to.getYaw());
+        adjustedDestination.setPitch(to.getPitch());
+        event.setTo(adjustedDestination);
+    }
+
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     public void onEntityExplodeHigh(EntityExplodeEvent event) {
         preventExplosionBlockDamage(event.blockList());
@@ -506,6 +558,16 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
 
     private String getProtectedRegionId() {
         return getConfig().getString(SPAWN_PROTECTION_CONFIG_PATH + ".region-id", "spawn").trim();
+    }
+
+    private boolean isLocationPassableForPlayer(Location location) {
+        if (location == null || location.getWorld() == null) {
+            return false;
+        }
+
+        Block feetBlock = location.getBlock();
+        Block headBlock = location.clone().add(0.0D, 1.0D, 0.0D).getBlock();
+        return feetBlock.isPassable() && headBlock.isPassable();
     }
 
     private static final class PacketCounter {

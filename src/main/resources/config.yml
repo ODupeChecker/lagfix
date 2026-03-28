@@ -11,3 +11,7 @@ whitelist-pickaxe:
 spawn-movement-protection:
   enabled: true
   region-id: spawn
+
+forward-teleport-wall-check:
+  enabled: true
+  ray-step: 0.2

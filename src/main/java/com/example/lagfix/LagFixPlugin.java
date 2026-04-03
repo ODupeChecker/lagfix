@@ -55,7 +55,6 @@ import org.bukkit.util.Vector;
 import java.util.ArrayList;
 import java.io.File;
 import java.io.IOException;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -84,7 +83,6 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
     private final HashMap<UUID, PacketCounter> packetCounters = new HashMap<>();
     private final Map<String, PersistRegion> persistRegions = new HashMap<>();
     private final Map<BlockKey, PersistBlockData> persistentBlocks = new HashMap<>();
-    private final List<BlockKey> integrityScanKeys = new ArrayList<>();
     private final Set<BlockKey> pendingBlockRestores = new HashSet<>();
     private ProtocolManager protocolManager;
     private BossTimerPlaceholder bossTimerPlaceholder;
@@ -92,8 +90,6 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
     private volatile long nextBossSpawnMillis;
     private boolean worldGuardAvailable;
     private volatile boolean blockPersistDirty;
-    private volatile boolean integrityScanKeysDirty;
-    private int integrityScanCursor;
 
     @Override
     public void onEnable() {
@@ -208,7 +204,6 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
 
             persistentBlocks.entrySet().removeIf(entry -> entry.getValue().regionName.equalsIgnoreCase(removed.name));
             markBlockPersistDirty();
-            markIntegrityScanKeysDirty();
             sender.sendMessage(ChatColor.GREEN + "Deleted persist region " + removed.name + ".");
             return true;
         }
@@ -266,7 +261,6 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
                 }
             }
         }
-        markIntegrityScanKeysDirty();
     }
 
     private boolean handleBossTimerCommand(CommandSender sender, String[] args) {
@@ -475,21 +469,7 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
                 return;
             }
 
-            if (integrityScanKeysDirty) {
-                rebuildIntegrityScanKeys();
-            }
-            if (integrityScanKeys.isEmpty()) {
-                return;
-            }
-
-            int checksPerTick = Math.max(1, getConfig().getInt("block-persist.integrity-checks-per-tick", 200));
-            int checks = Math.min(checksPerTick, integrityScanKeys.size());
-            for (int i = 0; i < checks; i++) {
-                if (integrityScanCursor >= integrityScanKeys.size()) {
-                    integrityScanCursor = 0;
-                }
-
-                BlockKey key = integrityScanKeys.get(integrityScanCursor++);
+            for (BlockKey key : new ArrayList<>(persistentBlocks.keySet())) {
                 if (key.worldName == null) {
                     continue;
                 }
@@ -606,7 +586,6 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
 
         persistentBlocks.put(key, PersistBlockData.fromBlock(region.name, block));
         markBlockPersistDirty();
-        markIntegrityScanKeysDirty();
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -809,8 +788,6 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
     private synchronized void loadBlockPersistState() {
         persistRegions.clear();
         persistentBlocks.clear();
-        integrityScanKeys.clear();
-        integrityScanCursor = 0;
 
         ConfigurationSection regionsSection = getConfig().getConfigurationSection(BLOCK_PERSIST_REGIONS_CONFIG_PATH);
         if (regionsSection != null) {
@@ -846,7 +823,6 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
                 }
             }
         }
-        markIntegrityScanKeysDirty();
     }
 
     private synchronized void saveBlockPersistState() {
@@ -886,18 +862,6 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
 
     private void markBlockPersistDirty() {
         blockPersistDirty = true;
-    }
-
-    private void markIntegrityScanKeysDirty() {
-        integrityScanKeysDirty = true;
-    }
-
-    private void rebuildIntegrityScanKeys() {
-        integrityScanKeys.clear();
-        integrityScanKeys.addAll(persistentBlocks.keySet());
-        integrityScanCursor = 0;
-        integrityScanKeysDirty = false;
-        Collections.shuffle(integrityScanKeys);
     }
 
     private boolean isWhitelistPickaxe(ItemStack item) {

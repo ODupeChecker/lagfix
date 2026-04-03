@@ -110,6 +110,7 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
         startCounterResetTask();
         startBossTimerTask();
         startBlockPersistSaveTask();
+        startBlockPersistIntegrityTask();
         registerBossTimerPlaceholder();
 
         getLogger().info("LagFix enabled.");
@@ -255,9 +256,6 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
             for (int y = region.minY; y <= region.maxY; y++) {
                 for (int z = region.minZ; z <= region.maxZ; z++) {
                     Block block = world.getBlockAt(x, y, z);
-                    if (block.getType().isAir()) {
-                        continue;
-                    }
                     BlockKey key = new BlockKey(world.getName(), x, y, z);
                     persistentBlocks.put(key, PersistBlockData.fromBlock(region.name, block));
                 }
@@ -465,6 +463,25 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
         }, 100L, 100L);
     }
 
+    private void startBlockPersistIntegrityTask() {
+        Bukkit.getScheduler().runTaskTimer(this, () -> {
+            if (persistentBlocks.isEmpty()) {
+                return;
+            }
+
+            for (BlockKey key : new ArrayList<>(persistentBlocks.keySet())) {
+                if (key.worldName == null) {
+                    continue;
+                }
+                org.bukkit.World world = Bukkit.getWorld(key.worldName);
+                if (world == null) {
+                    continue;
+                }
+                restoreIfPersistent(world.getBlockAt(key.x, key.y, key.z));
+            }
+        }, 20L, 20L);
+    }
+
     private void registerBossTimerPlaceholder() {
         if (!Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) {
             getLogger().warning("PlaceholderAPI not found. %boss_timer% will not be available.");
@@ -536,7 +553,7 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onBlockBreak(BlockBreakEvent event) {
-        handlePersistBlockBreak(event.getPlayer(), event.getBlock());
+        handlePersistBlockBreak(event.getBlock());
 
         Player player = event.getPlayer();
         ItemStack item = player.getInventory().getItemInMainHand();
@@ -555,10 +572,6 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onBlockPlace(BlockPlaceEvent event) {
-        if (!event.getPlayer().isOp()) {
-            return;
-        }
-
         PersistRegion region = getPersistRegion(event.getBlockPlaced().getLocation());
         if (region == null) {
             return;
@@ -566,6 +579,11 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
 
         Block block = event.getBlockPlaced();
         BlockKey key = BlockKey.fromLocation(block.getLocation());
+        if (persistentBlocks.containsKey(key)) {
+            restoreIfPersistent(block);
+            return;
+        }
+
         persistentBlocks.put(key, PersistBlockData.fromBlock(region.name, block));
         markBlockPersistDirty();
     }
@@ -709,17 +727,9 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
         }
     }
 
-    private void handlePersistBlockBreak(Player player, Block block) {
+    private void handlePersistBlockBreak(Block block) {
         BlockKey key = BlockKey.fromLocation(block.getLocation());
-        PersistBlockData existing = persistentBlocks.get(key);
-        if (existing == null) {
-            return;
-        }
-
-        if (player.isOp()) {
-            persistentBlocks.remove(key);
-            markBlockPersistDirty();
-            player.sendMessage(ChatColor.YELLOW + "persist block broken - will not persist");
+        if (!persistentBlocks.containsKey(key)) {
             return;
         }
 

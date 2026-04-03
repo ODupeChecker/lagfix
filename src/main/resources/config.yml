@@ -17,6 +17,5 @@ forward-teleport-wall-check:
   ray-step: 0.2
 
 block-persist:
-  integrity-checks-per-tick: 200
   regions: {}
   blocks: {}

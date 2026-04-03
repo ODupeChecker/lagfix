@@ -15,3 +15,7 @@ spawn-movement-protection:
 forward-teleport-wall-check:
   enabled: true
   ray-step: 0.2
+
+block-persist:
+  regions: {}
+  blocks: {}

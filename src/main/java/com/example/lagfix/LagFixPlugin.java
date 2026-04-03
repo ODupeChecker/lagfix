@@ -28,7 +28,6 @@ import org.bukkit.NamespacedKey;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.ConfigurationSection;
-import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -76,17 +75,13 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
     private static final String WHITELIST_PICKAXE_CONFIG_PATH = "whitelist-pickaxe.blocks";
     private static final String SPAWN_PROTECTION_CONFIG_PATH = "spawn-movement-protection";
     private static final String FORWARD_TELEPORT_WALL_CHECK_CONFIG_PATH = "forward-teleport-wall-check";
-    private static final String BLOCK_PERSIST_REGIONS_CONFIG_PATH = "regions";
-    private static final String BLOCK_PERSIST_BLOCKS_CONFIG_PATH = "blocks";
-    private static final long BLOCK_PERSIST_SAVE_INTERVAL_TICKS = 100L;
+    private static final String BLOCK_PERSIST_REGIONS_CONFIG_PATH = "block-persist.regions";
+    private static final String BLOCK_PERSIST_BLOCKS_CONFIG_PATH = "block-persist.blocks";
     private static final Vector ZERO_VECTOR = new Vector(0, 0, 0);
 
     private final HashMap<UUID, PacketCounter> packetCounters = new HashMap<>();
     private final Map<String, PersistRegion> persistRegions = new HashMap<>();
     private final Map<BlockKey, PersistBlockData> persistentBlocks = new HashMap<>();
-    private File blockPersistFile;
-    private boolean blockPersistDirty;
-    private boolean blockPersistSaveInProgress;
     private ProtocolManager protocolManager;
     private BossTimerPlaceholder bossTimerPlaceholder;
     private volatile long bossIntervalMillis;
@@ -97,7 +92,6 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
     public void onEnable() {
         saveDefaultConfig();
         loadBossTimerState();
-        initializeBlockPersistStorage();
         loadBlockPersistState();
         worldGuardAvailable = setupWorldGuardSupport();
 
@@ -131,7 +125,7 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
             packetCounters.clear();
         }
         saveBossTimerState();
-        flushBlockPersistStateSync();
+        saveBlockPersistState();
     }
 
     @Override
@@ -205,7 +199,7 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
             }
 
             persistentBlocks.entrySet().removeIf(entry -> entry.getValue().regionName.equalsIgnoreCase(removed.name));
-            markBlockPersistDirty();
+            saveBlockPersistState();
             sender.sendMessage(ChatColor.GREEN + "Deleted persist region " + removed.name + ".");
             return true;
         }
@@ -243,7 +237,7 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
                 max.getBlockX(), max.getBlockY(), max.getBlockZ());
         persistRegions.put(regionKey, region);
         captureRegionBlocks(region);
-        markBlockPersistDirty();
+        saveBlockPersistState();
         player.sendMessage(ChatColor.GREEN + "Persist region " + region.name + " created.");
         return true;
     }
@@ -559,12 +553,9 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
         }
 
         Block block = event.getBlockPlaced();
-        if (block.getType().isAir()) {
-            return;
-        }
         BlockKey key = BlockKey.fromLocation(block.getLocation());
         persistentBlocks.put(key, PersistBlockData.fromBlock(region.name, block));
-        markBlockPersistDirty();
+        saveBlockPersistState();
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -715,7 +706,7 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
 
         if (player.isOp()) {
             persistentBlocks.remove(key);
-            markBlockPersistDirty();
+            saveBlockPersistState();
             player.sendMessage(ChatColor.YELLOW + "persist block broken - will not persist");
             return;
         }
@@ -737,11 +728,6 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
         BlockKey key = BlockKey.fromLocation(block.getLocation());
         PersistBlockData data = persistentBlocks.get(key);
         if (data == null) {
-            return;
-        }
-        if (data.material.isAir()) {
-            persistentBlocks.remove(key);
-            markBlockPersistDirty();
             return;
         }
 
@@ -769,44 +755,11 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
         return null;
     }
 
-    private void initializeBlockPersistStorage() {
-        blockPersistFile = new File(getDataFolder(), "blockpersist.yml");
-        if (!blockPersistFile.exists()) {
-            try {
-                File parent = blockPersistFile.getParentFile();
-                if (parent != null && !parent.exists()) {
-                    parent.mkdirs();
-                }
-                blockPersistFile.createNewFile();
-            } catch (IOException exception) {
-                getLogger().severe("Failed creating blockpersist.yml: " + exception.getMessage());
-            }
-        }
-    }
-
-    private void startBlockPersistSaveTask() {
-        Bukkit.getScheduler().runTaskTimer(this, () -> {
-            if (!blockPersistDirty || blockPersistSaveInProgress) {
-                return;
-            }
-            flushBlockPersistStateAsync();
-        }, BLOCK_PERSIST_SAVE_INTERVAL_TICKS, BLOCK_PERSIST_SAVE_INTERVAL_TICKS);
-    }
-
-    private void markBlockPersistDirty() {
-        blockPersistDirty = true;
-    }
-
-    private void loadBlockPersistState() {
+    private synchronized void loadBlockPersistState() {
         persistRegions.clear();
         persistentBlocks.clear();
 
-        if (blockPersistFile == null || !blockPersistFile.exists()) {
-            return;
-        }
-
-        YamlConfiguration blockPersistConfig = YamlConfiguration.loadConfiguration(blockPersistFile);
-        ConfigurationSection regionsSection = blockPersistConfig.getConfigurationSection(BLOCK_PERSIST_REGIONS_CONFIG_PATH);
+        ConfigurationSection regionsSection = getConfig().getConfigurationSection(BLOCK_PERSIST_REGIONS_CONFIG_PATH);
         if (regionsSection != null) {
             for (String regionKey : regionsSection.getKeys(false)) {
                 ConfigurationSection section = regionsSection.getConfigurationSection(regionKey);
@@ -821,7 +774,7 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
             }
         }
 
-        ConfigurationSection blocksSection = blockPersistConfig.getConfigurationSection(BLOCK_PERSIST_BLOCKS_CONFIG_PATH);
+        ConfigurationSection blocksSection = getConfig().getConfigurationSection(BLOCK_PERSIST_BLOCKS_CONFIG_PATH);
         if (blocksSection != null) {
             for (String key : blocksSection.getKeys(false)) {
                 ConfigurationSection section = blocksSection.getConfigurationSection(key);
@@ -836,86 +789,44 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
                 }
 
                 if (persistRegions.containsKey(blockData.regionName.toLowerCase(Locale.ROOT))) {
-                    if (blockData.material.isAir()) {
-                        continue;
-                    }
                     persistentBlocks.put(blockKey, blockData);
                 }
             }
         }
     }
 
-    private void flushBlockPersistStateAsync() {
-        if (blockPersistFile == null) {
-            return;
-        }
-        blockPersistSaveInProgress = true;
-        blockPersistDirty = false;
-
-        YamlConfiguration snapshot = buildBlockPersistSnapshot();
-        String serialized = snapshot.saveToString();
-        File targetFile = blockPersistFile;
-        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
-            try {
-                java.nio.file.Files.writeString(targetFile.toPath(), serialized);
-            } catch (IOException exception) {
-                getLogger().severe("Failed async save for blockpersist.yml: " + exception.getMessage());
-                blockPersistDirty = true;
-            } finally {
-                blockPersistSaveInProgress = false;
-            }
-        });
-    }
-
-    private void flushBlockPersistStateSync() {
-        if (blockPersistFile == null) {
-            return;
-        }
-        YamlConfiguration snapshot = buildBlockPersistSnapshot();
-        try {
-            snapshot.save(blockPersistFile);
-            blockPersistDirty = false;
-        } catch (IOException exception) {
-            getLogger().severe("Failed sync save for blockpersist.yml: " + exception.getMessage());
-        }
-    }
-
-    private YamlConfiguration buildBlockPersistSnapshot() {
-        YamlConfiguration snapshot = new YamlConfiguration();
-        snapshot.set(BLOCK_PERSIST_REGIONS_CONFIG_PATH, null);
-        snapshot.set(BLOCK_PERSIST_BLOCKS_CONFIG_PATH, null);
+    private synchronized void saveBlockPersistState() {
+        getConfig().set(BLOCK_PERSIST_REGIONS_CONFIG_PATH, null);
+        getConfig().set(BLOCK_PERSIST_BLOCKS_CONFIG_PATH, null);
 
         for (PersistRegion region : persistRegions.values()) {
             String basePath = BLOCK_PERSIST_REGIONS_CONFIG_PATH + "." + region.name.toLowerCase(Locale.ROOT);
-            snapshot.set(basePath + ".name", region.name);
-            snapshot.set(basePath + ".world", region.worldName);
-            snapshot.set(basePath + ".min.x", region.minX);
-            snapshot.set(basePath + ".min.y", region.minY);
-            snapshot.set(basePath + ".min.z", region.minZ);
-            snapshot.set(basePath + ".max.x", region.maxX);
-            snapshot.set(basePath + ".max.y", region.maxY);
-            snapshot.set(basePath + ".max.z", region.maxZ);
+            getConfig().set(basePath + ".name", region.name);
+            getConfig().set(basePath + ".world", region.worldName);
+            getConfig().set(basePath + ".min.x", region.minX);
+            getConfig().set(basePath + ".min.y", region.minY);
+            getConfig().set(basePath + ".min.z", region.minZ);
+            getConfig().set(basePath + ".max.x", region.maxX);
+            getConfig().set(basePath + ".max.y", region.maxY);
+            getConfig().set(basePath + ".max.z", region.maxZ);
         }
 
         int index = 0;
         for (Map.Entry<BlockKey, PersistBlockData> entry : persistentBlocks.entrySet()) {
             BlockKey key = entry.getKey();
             PersistBlockData data = entry.getValue();
-            if (data.material.isAir()) {
-                continue;
-            }
             String basePath = BLOCK_PERSIST_BLOCKS_CONFIG_PATH + "." + index;
-            snapshot.set(basePath + ".region", data.regionName);
-            snapshot.set(basePath + ".world", key.worldName);
-            snapshot.set(basePath + ".x", key.x);
-            snapshot.set(basePath + ".y", key.y);
-            snapshot.set(basePath + ".z", key.z);
-            snapshot.set(basePath + ".material", data.material.name());
-            snapshot.set(basePath + ".block-data", data.blockData);
+            getConfig().set(basePath + ".region", data.regionName);
+            getConfig().set(basePath + ".world", key.worldName);
+            getConfig().set(basePath + ".x", key.x);
+            getConfig().set(basePath + ".y", key.y);
+            getConfig().set(basePath + ".z", key.z);
+            getConfig().set(basePath + ".material", data.material.name());
+            getConfig().set(basePath + ".block-data", data.blockData);
             index++;
         }
 
-        return snapshot;
+        saveConfig();
     }
 
     private boolean isWhitelistPickaxe(ItemStack item) {

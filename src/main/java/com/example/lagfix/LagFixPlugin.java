@@ -18,19 +18,24 @@ import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.block.Block;
+import org.bukkit.NamespacedKey;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockExplodeEvent;
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.event.player.PlayerVelocityEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.util.Vector;
@@ -56,6 +61,7 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
     private static final String WHITELIST_PICKAXE_CONFIG_PATH = "whitelist-pickaxe.blocks";
     private static final String SPAWN_PROTECTION_CONFIG_PATH = "spawn-movement-protection";
     private static final String FORWARD_TELEPORT_WALL_CHECK_CONFIG_PATH = "forward-teleport-wall-check";
+    private static final String PLAYER_ONLY_BOSS_DAMAGE_CONFIG_PATH = "player-only-boss-damage";
     private static final Vector ZERO_VECTOR = new Vector(0, 0, 0);
 
     private final HashMap<UUID, PacketCounter> packetCounters = new HashMap<>();
@@ -108,8 +114,8 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
             return handleBossTimerCommand(sender, args);
         }
 
-        if (command.getName().equalsIgnoreCase("whitelist")) {
-            return handleWhitelistCommand(sender, args);
+        if (command.getName().equalsIgnoreCase("whitelistpickaxe")) {
+            return handleWhitelistPickaxeCommand(sender, args);
         }
 
         return false;
@@ -156,27 +162,27 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
         return true;
     }
 
-    private boolean handleWhitelistCommand(CommandSender sender, String[] args) {
+    private boolean handleWhitelistPickaxeCommand(CommandSender sender, String[] args) {
         if (!sender.isOp()) {
             sender.sendMessage(ChatColor.RED + "Only operators can use this command.");
             return true;
         }
 
-        if (args.length != 3 || !args[0].equalsIgnoreCase("pickaxe")) {
-            sender.sendMessage(ChatColor.YELLOW + "Usage: /whitelist pickaxe <add|remove> <block>");
+        if (args.length != 2) {
+            sender.sendMessage(ChatColor.YELLOW + "Usage: /whitelistpickaxe <add|remove> <block>");
             return true;
         }
 
-        Material material = Material.matchMaterial(args[2]);
+        Material material = Material.matchMaterial(args[1]);
         if (material == null || !material.isBlock()) {
-            sender.sendMessage(ChatColor.RED + "Unknown block: " + args[2]);
+            sender.sendMessage(ChatColor.RED + "Unknown block: " + args[1]);
             return true;
         }
 
         Set<String> whitelist = getWhitelistedBlockNames();
         String materialName = material.name();
 
-        if (args[1].equalsIgnoreCase("add")) {
+        if (args[0].equalsIgnoreCase("add")) {
             if (!whitelist.add(materialName)) {
                 sender.sendMessage(ChatColor.YELLOW + materialName + " is already whitelisted for whitelist pickaxes.");
                 return true;
@@ -187,7 +193,7 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
             return true;
         }
 
-        if (args[1].equalsIgnoreCase("remove")) {
+        if (args[0].equalsIgnoreCase("remove")) {
             if (!whitelist.remove(materialName)) {
                 sender.sendMessage(ChatColor.YELLOW + materialName + " is not in the whitelist pickaxe block list.");
                 return true;
@@ -198,8 +204,52 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
             return true;
         }
 
-        sender.sendMessage(ChatColor.YELLOW + "Usage: /whitelist pickaxe <add|remove> <block>");
+        sender.sendMessage(ChatColor.YELLOW + "Usage: /whitelistpickaxe <add|remove> <block>");
         return true;
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onBossDamage(EntityDamageEvent event) {
+        if (!isPlayerOnlyBossDamageEnabled()) {
+            return;
+        }
+
+        if (!isMythicBoss(event.getEntity())) {
+            return;
+        }
+
+        if (event instanceof EntityDamageByEntityEvent damageByEntityEvent
+                && damageByEntityEvent.getDamager() instanceof Player) {
+            return;
+        }
+
+        event.setCancelled(true);
+    }
+
+    private boolean isPlayerOnlyBossDamageEnabled() {
+        return getConfig().getBoolean(PLAYER_ONLY_BOSS_DAMAGE_CONFIG_PATH + ".enabled", true);
+    }
+
+    private boolean isMythicBoss(Entity entity) {
+        NamespacedKey key = new NamespacedKey("mythicmobs", "type");
+        String mythicType = entity.getPersistentDataContainer().get(key, PersistentDataType.STRING);
+        if (mythicType == null || mythicType.isEmpty()) {
+            return false;
+        }
+
+        List<String> protectedTypes = getConfig().getStringList(PLAYER_ONLY_BOSS_DAMAGE_CONFIG_PATH + ".mythic-types");
+        if (protectedTypes.isEmpty()) {
+            return true;
+        }
+
+        String normalizedType = mythicType.toUpperCase(Locale.ROOT);
+        for (String protectedType : protectedTypes) {
+            if (normalizedType.equals(protectedType.toUpperCase(Locale.ROOT))) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void registerWindowClickListener() {

@@ -9,6 +9,6 @@ commands:
   bosstimer:
     description: Manage the boss spawn timer.
     usage: /bosstimer set <1h/2h/1.5h/3h> | /bosstimer spawn
-  whitelist:
+  whitelistpickaxe:
     description: Manage whitelist pickaxe blocks.
-    usage: /whitelist pickaxe <add|remove> <block>
+    usage: /whitelistpickaxe <add|remove> <block>

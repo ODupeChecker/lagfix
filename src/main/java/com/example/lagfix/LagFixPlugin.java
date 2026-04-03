@@ -56,6 +56,7 @@ import java.util.ArrayList;
 import java.io.File;
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
@@ -82,11 +83,13 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
     private final HashMap<UUID, PacketCounter> packetCounters = new HashMap<>();
     private final Map<String, PersistRegion> persistRegions = new HashMap<>();
     private final Map<BlockKey, PersistBlockData> persistentBlocks = new HashMap<>();
+    private final Set<BlockKey> pendingBlockRestores = new HashSet<>();
     private ProtocolManager protocolManager;
     private BossTimerPlaceholder bossTimerPlaceholder;
     private volatile long bossIntervalMillis;
     private volatile long nextBossSpawnMillis;
     private boolean worldGuardAvailable;
+    private volatile boolean blockPersistDirty;
 
     @Override
     public void onEnable() {
@@ -199,7 +202,7 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
             }
 
             persistentBlocks.entrySet().removeIf(entry -> entry.getValue().regionName.equalsIgnoreCase(removed.name));
-            saveBlockPersistState();
+            markBlockPersistDirty();
             sender.sendMessage(ChatColor.GREEN + "Deleted persist region " + removed.name + ".");
             return true;
         }
@@ -237,7 +240,7 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
                 max.getBlockX(), max.getBlockY(), max.getBlockZ());
         persistRegions.put(regionKey, region);
         captureRegionBlocks(region);
-        saveBlockPersistState();
+        markBlockPersistDirty();
         player.sendMessage(ChatColor.GREEN + "Persist region " + region.name + " created.");
         return true;
     }
@@ -453,6 +456,15 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
         }, 20L, 20L);
     }
 
+    private void startBlockPersistSaveTask() {
+        Bukkit.getScheduler().runTaskTimer(this, () -> {
+            if (!blockPersistDirty) {
+                return;
+            }
+            saveBlockPersistState();
+        }, 100L, 100L);
+    }
+
     private void registerBossTimerPlaceholder() {
         if (!Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) {
             getLogger().warning("PlaceholderAPI not found. %boss_timer% will not be available.");
@@ -555,7 +567,7 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
         Block block = event.getBlockPlaced();
         BlockKey key = BlockKey.fromLocation(block.getLocation());
         persistentBlocks.put(key, PersistBlockData.fromBlock(region.name, block));
-        saveBlockPersistState();
+        markBlockPersistDirty();
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -706,7 +718,7 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
 
         if (player.isOp()) {
             persistentBlocks.remove(key);
-            saveBlockPersistState();
+            markBlockPersistDirty();
             player.sendMessage(ChatColor.YELLOW + "persist block broken - will not persist");
             return;
         }
@@ -735,10 +747,18 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
             return;
         }
 
+        if (!pendingBlockRestores.add(key)) {
+            return;
+        }
+
         Bukkit.getScheduler().runTask(this, () -> {
-            Block currentBlock = block.getWorld().getBlockAt(block.getX(), block.getY(), block.getZ());
-            currentBlock.setType(data.material, false);
-            currentBlock.setBlockData(Bukkit.createBlockData(data.blockData), false);
+            try {
+                Block currentBlock = block.getWorld().getBlockAt(block.getX(), block.getY(), block.getZ());
+                currentBlock.setType(data.material, false);
+                currentBlock.setBlockData(Bukkit.createBlockData(data.blockData), false);
+            } finally {
+                pendingBlockRestores.remove(key);
+            }
         });
     }
 
@@ -796,6 +816,7 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
     }
 
     private synchronized void saveBlockPersistState() {
+        blockPersistDirty = false;
         getConfig().set(BLOCK_PERSIST_REGIONS_CONFIG_PATH, null);
         getConfig().set(BLOCK_PERSIST_BLOCKS_CONFIG_PATH, null);
 
@@ -827,6 +848,10 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
         }
 
         saveConfig();
+    }
+
+    private void markBlockPersistDirty() {
+        blockPersistDirty = true;
     }
 
     private boolean isWhitelistPickaxe(ItemStack item) {

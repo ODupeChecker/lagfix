@@ -17,6 +17,7 @@ import org.bukkit.ChatColor;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.OfflinePlayer;
+import org.bukkit.Tag;
 import org.bukkit.block.Block;
 import org.bukkit.NamespacedKey;
 import org.bukkit.command.Command;
@@ -28,14 +29,12 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockExplodeEvent;
-import org.bukkit.event.entity.EntityDamageByEntityEvent;
-import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
+import org.bukkit.event.player.PlayerSwapHandItemsEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.event.player.PlayerVelocityEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
-import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.util.Vector;
@@ -61,7 +60,6 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
     private static final String WHITELIST_PICKAXE_CONFIG_PATH = "whitelist-pickaxe.blocks";
     private static final String SPAWN_PROTECTION_CONFIG_PATH = "spawn-movement-protection";
     private static final String FORWARD_TELEPORT_WALL_CHECK_CONFIG_PATH = "forward-teleport-wall-check";
-    private static final String PLAYER_ONLY_BOSS_DAMAGE_CONFIG_PATH = "player-only-boss-damage";
     private static final Vector ZERO_VECTOR = new Vector(0, 0, 0);
 
     private final HashMap<UUID, PacketCounter> packetCounters = new HashMap<>();
@@ -209,47 +207,32 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    public void onBossDamage(EntityDamageEvent event) {
-        if (!isPlayerOnlyBossDamageEnabled()) {
+    public void onPlayerSwapHandItems(PlayerSwapHandItemsEvent event) {
+        if (!worldGuardAvailable) {
             return;
         }
 
-        if (!isMythicBoss(event.getEntity())) {
+        Player player = event.getPlayer();
+        if (!isInRegion(player.getLocation(), "bossarea")) {
             return;
         }
 
-        if (event instanceof EntityDamageByEntityEvent damageByEntityEvent
-                && damageByEntityEvent.getDamager() instanceof Player) {
+        if (!isOffhandRestrictedWeapon(event.getMainHandItem()) && !isOffhandRestrictedWeapon(event.getOffHandItem())) {
             return;
         }
 
         event.setCancelled(true);
     }
 
-    private boolean isPlayerOnlyBossDamageEnabled() {
-        return getConfig().getBoolean(PLAYER_ONLY_BOSS_DAMAGE_CONFIG_PATH + ".enabled", true);
-    }
-
-    private boolean isMythicBoss(Entity entity) {
-        NamespacedKey key = new NamespacedKey("mythicmobs", "type");
-        String mythicType = entity.getPersistentDataContainer().get(key, PersistentDataType.STRING);
-        if (mythicType == null || mythicType.isEmpty()) {
+    private boolean isOffhandRestrictedWeapon(ItemStack item) {
+        if (item == null) {
             return false;
         }
 
-        List<String> protectedTypes = getConfig().getStringList(PLAYER_ONLY_BOSS_DAMAGE_CONFIG_PATH + ".mythic-types");
-        if (protectedTypes.isEmpty()) {
-            return true;
-        }
-
-        String normalizedType = mythicType.toUpperCase(Locale.ROOT);
-        for (String protectedType : protectedTypes) {
-            if (normalizedType.equals(protectedType.toUpperCase(Locale.ROOT))) {
-                return true;
-            }
-        }
-
-        return false;
+        Material material = item.getType();
+        return Tag.ITEMS_SWORDS.isTagged(material)
+                || Tag.ITEMS_AXES.isTagged(material)
+                || material == Material.CROSSBOW;
     }
 
     private void registerWindowClickListener() {
@@ -568,32 +551,32 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
     }
 
     private boolean setupWorldGuardSupport() {
-        if (!getConfig().getBoolean(SPAWN_PROTECTION_CONFIG_PATH + ".enabled", true)) {
-            getLogger().info("Spawn movement protection is disabled in config.");
-            return false;
-        }
-
         Plugin worldGuardPlugin = Bukkit.getPluginManager().getPlugin("WorldGuard");
         if (!(worldGuardPlugin instanceof WorldGuardPlugin)) {
-            getLogger().warning("WorldGuard not found; spawn movement protection is unavailable.");
+            getLogger().warning("WorldGuard not found; WorldGuard-based protections are unavailable.");
             return false;
         }
-
-        String regionId = getProtectedRegionId();
-        if (regionId.isEmpty()) {
-            getLogger().warning("Spawn movement protection region id is empty; protection is disabled.");
-            return false;
-        }
-
-        getLogger().info("Spawn movement protection enabled for WorldGuard region '" + regionId + "'.");
+        getLogger().info("WorldGuard support enabled.");
         return true;
     }
 
     private boolean shouldBlockExternalMovement(Location location) {
-        return worldGuardAvailable && isProtectedSpawnRegion(location);
+        if (!worldGuardAvailable) {
+            return false;
+        }
+        if (!getConfig().getBoolean(SPAWN_PROTECTION_CONFIG_PATH + ".enabled", true)) {
+            return false;
+        }
+
+        String protectedRegionId = getProtectedRegionId();
+        if (protectedRegionId.isEmpty()) {
+            return false;
+        }
+
+        return isInRegion(location, protectedRegionId);
     }
 
-    private boolean isProtectedSpawnRegion(Location location) {
+    private boolean isInRegion(Location location, String regionId) {
         if (location == null || location.getWorld() == null) {
             return false;
         }
@@ -605,9 +588,8 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
         }
 
         ApplicableRegionSet applicableRegions = regionManager.getApplicableRegions(BukkitAdapter.asBlockVector(location));
-        String protectedRegionId = getProtectedRegionId();
         return applicableRegions.getRegions().stream()
-                .anyMatch(region -> region.getId().equalsIgnoreCase(protectedRegionId));
+                .anyMatch(region -> region.getId().equalsIgnoreCase(regionId));
     }
 
     private String getProtectedRegionId() {

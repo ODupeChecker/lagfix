@@ -15,8 +15,3 @@ spawn-movement-protection:
 forward-teleport-wall-check:
   enabled: true
   ray-step: 0.2
-
-player-only-boss-damage:
-  enabled: true
-  mythic-types:
-    - TOWER_SKELETON

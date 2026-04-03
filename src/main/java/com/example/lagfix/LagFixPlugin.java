@@ -22,7 +22,6 @@ import org.bukkit.NamespacedKey;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Entity;
-import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -215,50 +214,16 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
             return;
         }
 
-        if (!(event.getEntity() instanceof LivingEntity boss)) {
+        if (!isMythicBoss(event.getEntity())) {
             return;
         }
 
-        if (!isMythicBoss(boss)) {
-            return;
-        }
-
-        if (!boss.isInvulnerable()) {
-            boss.setInvulnerable(true);
-        }
-
-        if (isAllowedPlayerMeleeHit(event)) {
-            double remainingHealth = boss.getHealth() - event.getFinalDamage();
-            event.setCancelled(true);
-            event.setDamage(0.0);
-
-            if (remainingHealth <= 0.0D) {
-                boss.setInvulnerable(false);
-                boss.setHealth(0.0D);
-                return;
-            }
-
-            boss.setHealth(Math.min(remainingHealth, boss.getMaxHealth()));
-            boss.setNoDamageTicks(0);
+        if (event instanceof EntityDamageByEntityEvent damageByEntityEvent
+                && damageByEntityEvent.getDamager() instanceof Player) {
             return;
         }
 
         event.setCancelled(true);
-        event.setDamage(0.0);
-    }
-
-    private boolean isAllowedPlayerMeleeHit(EntityDamageEvent event) {
-        if (!(event instanceof EntityDamageByEntityEvent damageByEntityEvent)) {
-            return false;
-        }
-
-        if (!(damageByEntityEvent.getDamager() instanceof Player)) {
-            return false;
-        }
-
-        EntityDamageEvent.DamageCause cause = event.getCause();
-        return cause == EntityDamageEvent.DamageCause.ENTITY_ATTACK
-                || cause == EntityDamageEvent.DamageCause.ENTITY_SWEEP_ATTACK;
     }
 
     private boolean isPlayerOnlyBossDamageEnabled() {

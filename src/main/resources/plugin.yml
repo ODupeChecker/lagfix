@@ -12,3 +12,6 @@ commands:
   whitelistpickaxe:
     description: Manage whitelist pickaxe blocks.
     usage: /whitelistpickaxe <add|remove> <block>
+  blockpersist:
+    description: Manage block persistence regions.
+    usage: /blockpersist <create|list|delete>

@@ -6,7 +6,12 @@ import com.comphenix.protocol.ProtocolManager;
 import com.comphenix.protocol.events.ListenerPriority;
 import com.comphenix.protocol.events.PacketAdapter;
 import com.comphenix.protocol.events.PacketEvent;
+import com.sk89q.worldedit.IncompleteRegionException;
+import com.sk89q.worldedit.WorldEdit;
+import com.sk89q.worldedit.bukkit.BukkitPlayer;
 import com.sk89q.worldedit.bukkit.BukkitAdapter;
+import com.sk89q.worldedit.math.BlockVector3;
+import com.sk89q.worldedit.regions.Region;
 import com.sk89q.worldguard.WorldGuard;
 import com.sk89q.worldguard.bukkit.WorldGuardPlugin;
 import com.sk89q.worldguard.protection.ApplicableRegionSet;
@@ -22,14 +27,23 @@ import org.bukkit.block.Block;
 import org.bukkit.NamespacedKey;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
+import org.bukkit.configuration.ConfigurationSection;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockBurnEvent;
 import org.bukkit.event.block.BlockExplodeEvent;
+import org.bukkit.event.block.BlockFadeEvent;
+import org.bukkit.event.block.BlockPistonExtendEvent;
+import org.bukkit.event.block.BlockPistonRetractEvent;
+import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.block.BlockSpreadEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
+import org.bukkit.event.entity.EntityChangeBlockEvent;
 import org.bukkit.event.player.PlayerSwapHandItemsEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.event.player.PlayerVelocityEvent;
@@ -40,6 +54,8 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.util.Vector;
 
 import java.util.ArrayList;
+import java.io.File;
+import java.io.IOException;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -60,9 +76,17 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
     private static final String WHITELIST_PICKAXE_CONFIG_PATH = "whitelist-pickaxe.blocks";
     private static final String SPAWN_PROTECTION_CONFIG_PATH = "spawn-movement-protection";
     private static final String FORWARD_TELEPORT_WALL_CHECK_CONFIG_PATH = "forward-teleport-wall-check";
+    private static final String BLOCK_PERSIST_REGIONS_CONFIG_PATH = "regions";
+    private static final String BLOCK_PERSIST_BLOCKS_CONFIG_PATH = "blocks";
+    private static final long BLOCK_PERSIST_SAVE_INTERVAL_TICKS = 100L;
     private static final Vector ZERO_VECTOR = new Vector(0, 0, 0);
 
     private final HashMap<UUID, PacketCounter> packetCounters = new HashMap<>();
+    private final Map<String, PersistRegion> persistRegions = new HashMap<>();
+    private final Map<BlockKey, PersistBlockData> persistentBlocks = new HashMap<>();
+    private File blockPersistFile;
+    private boolean blockPersistDirty;
+    private boolean blockPersistSaveInProgress;
     private ProtocolManager protocolManager;
     private BossTimerPlaceholder bossTimerPlaceholder;
     private volatile long bossIntervalMillis;
@@ -73,6 +97,8 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
     public void onEnable() {
         saveDefaultConfig();
         loadBossTimerState();
+        initializeBlockPersistStorage();
+        loadBlockPersistState();
         worldGuardAvailable = setupWorldGuardSupport();
 
         if (!Bukkit.getPluginManager().isPluginEnabled("ProtocolLib")) {
@@ -86,6 +112,7 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
         registerWindowClickListener();
         startCounterResetTask();
         startBossTimerTask();
+        startBlockPersistSaveTask();
         registerBossTimerPlaceholder();
 
         getLogger().info("LagFix enabled.");
@@ -104,6 +131,7 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
             packetCounters.clear();
         }
         saveBossTimerState();
+        flushBlockPersistStateSync();
     }
 
     @Override
@@ -116,7 +144,128 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
             return handleWhitelistPickaxeCommand(sender, args);
         }
 
+        if (command.getName().equalsIgnoreCase("blockpersist")) {
+            return handleBlockPersistCommand(sender, args);
+        }
+
         return false;
+    }
+
+    private boolean handleBlockPersistCommand(CommandSender sender, String[] args) {
+        if (!sender.isOp()) {
+            sender.sendMessage(ChatColor.RED + "Only operators can use this command.");
+            return true;
+        }
+
+        if (args.length == 0) {
+            sender.sendMessage(ChatColor.YELLOW + "Usage: /blockpersist <create|list|delete>");
+            return true;
+        }
+
+        if (args[0].equalsIgnoreCase("create")) {
+            if (!(sender instanceof Player)) {
+                sender.sendMessage(ChatColor.RED + "Only players can use /blockpersist create.");
+                return true;
+            }
+            if (args.length != 2) {
+                sender.sendMessage(ChatColor.YELLOW + "Usage: /blockpersist create <name>");
+                return true;
+            }
+            return createPersistRegion((Player) sender, args[1]);
+        }
+
+        if (args[0].equalsIgnoreCase("list")) {
+            if (persistRegions.isEmpty()) {
+                sender.sendMessage(ChatColor.YELLOW + "No persist regions exist.");
+                return true;
+            }
+
+            sender.sendMessage(ChatColor.GREEN + "Persist regions:");
+            for (PersistRegion region : persistRegions.values().stream()
+                    .sorted((left, right) -> left.name.compareToIgnoreCase(right.name))
+                    .collect(Collectors.toList())) {
+                sender.sendMessage(ChatColor.AQUA + "- " + region.name + ChatColor.GRAY + " @ "
+                        + region.worldName + " "
+                        + region.minX + "," + region.minY + "," + region.minZ);
+            }
+            return true;
+        }
+
+        if (args[0].equalsIgnoreCase("delete")) {
+            if (args.length != 2) {
+                sender.sendMessage(ChatColor.YELLOW + "Usage: /blockpersist delete <name>");
+                return true;
+            }
+
+            String regionKey = args[1].toLowerCase(Locale.ROOT);
+            PersistRegion removed = persistRegions.remove(regionKey);
+            if (removed == null) {
+                sender.sendMessage(ChatColor.RED + "Persist region not found: " + args[1]);
+                return true;
+            }
+
+            persistentBlocks.entrySet().removeIf(entry -> entry.getValue().regionName.equalsIgnoreCase(removed.name));
+            markBlockPersistDirty();
+            sender.sendMessage(ChatColor.GREEN + "Deleted persist region " + removed.name + ".");
+            return true;
+        }
+
+        sender.sendMessage(ChatColor.YELLOW + "Usage: /blockpersist <create|list|delete>");
+        return true;
+    }
+
+    private boolean createPersistRegion(Player player, String rawName) {
+        String regionName = rawName.trim();
+        if (regionName.isEmpty()) {
+            player.sendMessage(ChatColor.RED + "Region name cannot be empty.");
+            return true;
+        }
+        String regionKey = regionName.toLowerCase(Locale.ROOT);
+        if (persistRegions.containsKey(regionKey)) {
+            player.sendMessage(ChatColor.RED + "A persist region with that name already exists.");
+            return true;
+        }
+
+        BukkitPlayer worldEditPlayer = BukkitAdapter.adapt(player);
+        Region selection;
+        try {
+            selection = WorldEdit.getInstance().getSessionManager().get(worldEditPlayer)
+                    .getSelection(worldEditPlayer.getWorld());
+        } catch (IncompleteRegionException exception) {
+            player.sendMessage(ChatColor.RED + "You must make a full WorldEdit selection first.");
+            return true;
+        }
+
+        BlockVector3 min = selection.getMinimumPoint();
+        BlockVector3 max = selection.getMaximumPoint();
+        PersistRegion region = new PersistRegion(regionName, player.getWorld().getName(),
+                min.getBlockX(), min.getBlockY(), min.getBlockZ(),
+                max.getBlockX(), max.getBlockY(), max.getBlockZ());
+        persistRegions.put(regionKey, region);
+        captureRegionBlocks(region);
+        markBlockPersistDirty();
+        player.sendMessage(ChatColor.GREEN + "Persist region " + region.name + " created.");
+        return true;
+    }
+
+    private void captureRegionBlocks(PersistRegion region) {
+        org.bukkit.World world = Bukkit.getWorld(region.worldName);
+        if (world == null) {
+            return;
+        }
+
+        for (int x = region.minX; x <= region.maxX; x++) {
+            for (int y = region.minY; y <= region.maxY; y++) {
+                for (int z = region.minZ; z <= region.maxZ; z++) {
+                    Block block = world.getBlockAt(x, y, z);
+                    if (block.getType().isAir()) {
+                        continue;
+                    }
+                    BlockKey key = new BlockKey(world.getName(), x, y, z);
+                    persistentBlocks.put(key, PersistBlockData.fromBlock(region.name, block));
+                }
+            }
+        }
     }
 
     private boolean handleBossTimerCommand(CommandSender sender, String[] args) {
@@ -381,6 +530,8 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onBlockBreak(BlockBreakEvent event) {
+        handlePersistBlockBreak(event.getPlayer(), event.getBlock());
+
         Player player = event.getPlayer();
         ItemStack item = player.getInventory().getItemInMainHand();
         if (!isWhitelistPickaxe(item)) {
@@ -394,6 +545,26 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
 
         event.setCancelled(true);
         player.sendMessage(ChatColor.RED + "This whitelist pickaxe can only mine whitelisted blocks.");
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onBlockPlace(BlockPlaceEvent event) {
+        if (!event.getPlayer().isOp()) {
+            return;
+        }
+
+        PersistRegion region = getPersistRegion(event.getBlockPlaced().getLocation());
+        if (region == null) {
+            return;
+        }
+
+        Block block = event.getBlockPlaced();
+        if (block.getType().isAir()) {
+            return;
+        }
+        BlockKey key = BlockKey.fromLocation(block.getLocation());
+        persistentBlocks.put(key, PersistBlockData.fromBlock(region.name, block));
+        markBlockPersistDirty();
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -472,32 +643,279 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     public void onEntityExplodeHigh(EntityExplodeEvent event) {
+        handlePersistentBlocksPotentiallyBroken(event.blockList());
         preventExplosionBlockDamage(event.blockList());
         event.setYield(0.0f);
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = false)
     public void onEntityExplodeMonitor(EntityExplodeEvent event) {
+        handlePersistentBlocksPotentiallyBroken(event.blockList());
         preventExplosionBlockDamage(event.blockList());
         event.setYield(0.0f);
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     public void onBlockExplodeHigh(BlockExplodeEvent event) {
+        handlePersistentBlocksPotentiallyBroken(event.blockList());
         preventExplosionBlockDamage(event.blockList());
         event.setYield(0.0f);
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = false)
     public void onBlockExplodeMonitor(BlockExplodeEvent event) {
+        handlePersistentBlocksPotentiallyBroken(event.blockList());
         preventExplosionBlockDamage(event.blockList());
         event.setYield(0.0f);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = false)
+    public void onBlockBurn(BlockBurnEvent event) {
+        restoreIfPersistent(event.getBlock());
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = false)
+    public void onBlockFade(BlockFadeEvent event) {
+        restoreIfPersistent(event.getBlock());
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = false)
+    public void onBlockSpread(BlockSpreadEvent event) {
+        restoreIfPersistent(event.getSource());
+        restoreIfPersistent(event.getBlock());
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = false)
+    public void onEntityChangeBlock(EntityChangeBlockEvent event) {
+        restoreIfPersistent(event.getBlock());
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = false)
+    public void onPistonExtend(BlockPistonExtendEvent event) {
+        handlePersistentBlocksPotentiallyBroken(event.getBlocks());
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = false)
+    public void onPistonRetract(BlockPistonRetractEvent event) {
+        handlePersistentBlocksPotentiallyBroken(event.getBlocks());
     }
 
     private void preventExplosionBlockDamage(List<Block> blocks) {
         if (!blocks.isEmpty()) {
             blocks.clear();
         }
+    }
+
+    private void handlePersistBlockBreak(Player player, Block block) {
+        BlockKey key = BlockKey.fromLocation(block.getLocation());
+        PersistBlockData existing = persistentBlocks.get(key);
+        if (existing == null) {
+            return;
+        }
+
+        if (player.isOp()) {
+            persistentBlocks.remove(key);
+            markBlockPersistDirty();
+            player.sendMessage(ChatColor.YELLOW + "persist block broken - will not persist");
+            return;
+        }
+
+        restoreIfPersistent(block);
+    }
+
+    private void handlePersistentBlocksPotentiallyBroken(List<Block> blocks) {
+        for (Block block : blocks) {
+            restoreIfPersistent(block);
+        }
+    }
+
+    private void restoreIfPersistent(Block block) {
+        if (block == null || block.getWorld() == null) {
+            return;
+        }
+
+        BlockKey key = BlockKey.fromLocation(block.getLocation());
+        PersistBlockData data = persistentBlocks.get(key);
+        if (data == null) {
+            return;
+        }
+        if (data.material.isAir()) {
+            persistentBlocks.remove(key);
+            markBlockPersistDirty();
+            return;
+        }
+
+        if (block.getType() == data.material && block.getBlockData().getAsString().equals(data.blockData)) {
+            return;
+        }
+
+        Bukkit.getScheduler().runTask(this, () -> {
+            Block currentBlock = block.getWorld().getBlockAt(block.getX(), block.getY(), block.getZ());
+            currentBlock.setType(data.material, false);
+            currentBlock.setBlockData(Bukkit.createBlockData(data.blockData), false);
+        });
+    }
+
+    private PersistRegion getPersistRegion(Location location) {
+        if (location == null || location.getWorld() == null) {
+            return null;
+        }
+
+        for (PersistRegion region : persistRegions.values()) {
+            if (region.contains(location)) {
+                return region;
+            }
+        }
+        return null;
+    }
+
+    private void initializeBlockPersistStorage() {
+        blockPersistFile = new File(getDataFolder(), "blockpersist.yml");
+        if (!blockPersistFile.exists()) {
+            try {
+                File parent = blockPersistFile.getParentFile();
+                if (parent != null && !parent.exists()) {
+                    parent.mkdirs();
+                }
+                blockPersistFile.createNewFile();
+            } catch (IOException exception) {
+                getLogger().severe("Failed creating blockpersist.yml: " + exception.getMessage());
+            }
+        }
+    }
+
+    private void startBlockPersistSaveTask() {
+        Bukkit.getScheduler().runTaskTimer(this, () -> {
+            if (!blockPersistDirty || blockPersistSaveInProgress) {
+                return;
+            }
+            flushBlockPersistStateAsync();
+        }, BLOCK_PERSIST_SAVE_INTERVAL_TICKS, BLOCK_PERSIST_SAVE_INTERVAL_TICKS);
+    }
+
+    private void markBlockPersistDirty() {
+        blockPersistDirty = true;
+    }
+
+    private void loadBlockPersistState() {
+        persistRegions.clear();
+        persistentBlocks.clear();
+
+        if (blockPersistFile == null || !blockPersistFile.exists()) {
+            return;
+        }
+
+        YamlConfiguration blockPersistConfig = YamlConfiguration.loadConfiguration(blockPersistFile);
+        ConfigurationSection regionsSection = blockPersistConfig.getConfigurationSection(BLOCK_PERSIST_REGIONS_CONFIG_PATH);
+        if (regionsSection != null) {
+            for (String regionKey : regionsSection.getKeys(false)) {
+                ConfigurationSection section = regionsSection.getConfigurationSection(regionKey);
+                if (section == null) {
+                    continue;
+                }
+
+                PersistRegion region = PersistRegion.fromConfig(regionKey, section);
+                if (region != null) {
+                    persistRegions.put(regionKey.toLowerCase(Locale.ROOT), region);
+                }
+            }
+        }
+
+        ConfigurationSection blocksSection = blockPersistConfig.getConfigurationSection(BLOCK_PERSIST_BLOCKS_CONFIG_PATH);
+        if (blocksSection != null) {
+            for (String key : blocksSection.getKeys(false)) {
+                ConfigurationSection section = blocksSection.getConfigurationSection(key);
+                if (section == null) {
+                    continue;
+                }
+
+                PersistBlockData blockData = PersistBlockData.fromConfig(section);
+                BlockKey blockKey = BlockKey.fromConfig(section);
+                if (blockData == null || blockKey == null) {
+                    continue;
+                }
+
+                if (persistRegions.containsKey(blockData.regionName.toLowerCase(Locale.ROOT))) {
+                    if (blockData.material.isAir()) {
+                        continue;
+                    }
+                    persistentBlocks.put(blockKey, blockData);
+                }
+            }
+        }
+    }
+
+    private void flushBlockPersistStateAsync() {
+        if (blockPersistFile == null) {
+            return;
+        }
+        blockPersistSaveInProgress = true;
+        blockPersistDirty = false;
+
+        YamlConfiguration snapshot = buildBlockPersistSnapshot();
+        String serialized = snapshot.saveToString();
+        File targetFile = blockPersistFile;
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+            try {
+                java.nio.file.Files.writeString(targetFile.toPath(), serialized);
+            } catch (IOException exception) {
+                getLogger().severe("Failed async save for blockpersist.yml: " + exception.getMessage());
+                blockPersistDirty = true;
+            } finally {
+                blockPersistSaveInProgress = false;
+            }
+        });
+    }
+
+    private void flushBlockPersistStateSync() {
+        if (blockPersistFile == null) {
+            return;
+        }
+        YamlConfiguration snapshot = buildBlockPersistSnapshot();
+        try {
+            snapshot.save(blockPersistFile);
+            blockPersistDirty = false;
+        } catch (IOException exception) {
+            getLogger().severe("Failed sync save for blockpersist.yml: " + exception.getMessage());
+        }
+    }
+
+    private YamlConfiguration buildBlockPersistSnapshot() {
+        YamlConfiguration snapshot = new YamlConfiguration();
+        snapshot.set(BLOCK_PERSIST_REGIONS_CONFIG_PATH, null);
+        snapshot.set(BLOCK_PERSIST_BLOCKS_CONFIG_PATH, null);
+
+        for (PersistRegion region : persistRegions.values()) {
+            String basePath = BLOCK_PERSIST_REGIONS_CONFIG_PATH + "." + region.name.toLowerCase(Locale.ROOT);
+            snapshot.set(basePath + ".name", region.name);
+            snapshot.set(basePath + ".world", region.worldName);
+            snapshot.set(basePath + ".min.x", region.minX);
+            snapshot.set(basePath + ".min.y", region.minY);
+            snapshot.set(basePath + ".min.z", region.minZ);
+            snapshot.set(basePath + ".max.x", region.maxX);
+            snapshot.set(basePath + ".max.y", region.maxY);
+            snapshot.set(basePath + ".max.z", region.maxZ);
+        }
+
+        int index = 0;
+        for (Map.Entry<BlockKey, PersistBlockData> entry : persistentBlocks.entrySet()) {
+            BlockKey key = entry.getKey();
+            PersistBlockData data = entry.getValue();
+            if (data.material.isAir()) {
+                continue;
+            }
+            String basePath = BLOCK_PERSIST_BLOCKS_CONFIG_PATH + "." + index;
+            snapshot.set(basePath + ".region", data.regionName);
+            snapshot.set(basePath + ".world", key.worldName);
+            snapshot.set(basePath + ".x", key.x);
+            snapshot.set(basePath + ".y", key.y);
+            snapshot.set(basePath + ".z", key.z);
+            snapshot.set(basePath + ".material", data.material.name());
+            snapshot.set(basePath + ".block-data", data.blockData);
+            index++;
+        }
+
+        return snapshot;
     }
 
     private boolean isWhitelistPickaxe(ItemStack item) {
@@ -610,6 +1028,123 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
         private int windowClicksThisSecond;
         private long lastLogMillis;
         private long lastSeenMillis;
+    }
+
+    private static final class PersistRegion {
+        private final String name;
+        private final String worldName;
+        private final int minX;
+        private final int minY;
+        private final int minZ;
+        private final int maxX;
+        private final int maxY;
+        private final int maxZ;
+
+        private PersistRegion(String name, String worldName, int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {
+            this.name = name;
+            this.worldName = worldName;
+            this.minX = minX;
+            this.minY = minY;
+            this.minZ = minZ;
+            this.maxX = maxX;
+            this.maxY = maxY;
+            this.maxZ = maxZ;
+        }
+
+        private boolean contains(Location location) {
+            return location.getWorld() != null
+                    && location.getWorld().getName().equals(worldName)
+                    && location.getBlockX() >= minX && location.getBlockX() <= maxX
+                    && location.getBlockY() >= minY && location.getBlockY() <= maxY
+                    && location.getBlockZ() >= minZ && location.getBlockZ() <= maxZ;
+        }
+
+        private static PersistRegion fromConfig(String fallbackName, ConfigurationSection section) {
+            String world = section.getString("world");
+            if (world == null || world.isBlank()) {
+                return null;
+            }
+            String configuredName = section.getString("name", fallbackName);
+            int minX = section.getInt("min.x");
+            int minY = section.getInt("min.y");
+            int minZ = section.getInt("min.z");
+            int maxX = section.getInt("max.x");
+            int maxY = section.getInt("max.y");
+            int maxZ = section.getInt("max.z");
+            return new PersistRegion(configuredName, world, minX, minY, minZ, maxX, maxY, maxZ);
+        }
+    }
+
+    private static final class BlockKey {
+        private final String worldName;
+        private final int x;
+        private final int y;
+        private final int z;
+
+        private BlockKey(String worldName, int x, int y, int z) {
+            this.worldName = worldName;
+            this.x = x;
+            this.y = y;
+            this.z = z;
+        }
+
+        private static BlockKey fromLocation(Location location) {
+            return new BlockKey(location.getWorld().getName(), location.getBlockX(), location.getBlockY(), location.getBlockZ());
+        }
+
+        private static BlockKey fromConfig(ConfigurationSection section) {
+            String world = section.getString("world");
+            if (world == null || world.isBlank()) {
+                return null;
+            }
+            return new BlockKey(world, section.getInt("x"), section.getInt("y"), section.getInt("z"));
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            if (!(other instanceof BlockKey)) {
+                return false;
+            }
+            BlockKey key = (BlockKey) other;
+            return x == key.x && y == key.y && z == key.z && worldName.equals(key.worldName);
+        }
+
+        @Override
+        public int hashCode() {
+            return worldName.hashCode() * 31 * 31 * 31 + x * 31 * 31 + y * 31 + z;
+        }
+    }
+
+    private static final class PersistBlockData {
+        private final String regionName;
+        private final Material material;
+        private final String blockData;
+
+        private PersistBlockData(String regionName, Material material, String blockData) {
+            this.regionName = regionName;
+            this.material = material;
+            this.blockData = blockData;
+        }
+
+        private static PersistBlockData fromBlock(String regionName, Block block) {
+            return new PersistBlockData(regionName, block.getType(), block.getBlockData().getAsString());
+        }
+
+        private static PersistBlockData fromConfig(ConfigurationSection section) {
+            String regionName = section.getString("region");
+            String materialName = section.getString("material");
+            String blockData = section.getString("block-data");
+            if (regionName == null || materialName == null || blockData == null) {
+                return null;
+            }
+
+            Material material = Material.matchMaterial(materialName);
+            if (material == null) {
+                return null;
+            }
+
+            return new PersistBlockData(regionName, material, blockData);
+        }
     }
 
     private static final class BossTimerPlaceholder extends PlaceholderExpansion {

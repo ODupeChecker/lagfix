@@ -53,6 +53,8 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.util.Vector;
 
 import java.util.ArrayList;
+import java.io.File;
+import java.io.IOException;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -104,6 +106,7 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
         registerWindowClickListener();
         startCounterResetTask();
         startBossTimerTask();
+        startBlockPersistSaveTask();
         registerBossTimerPlaceholder();
 
         getLogger().info("LagFix enabled.");

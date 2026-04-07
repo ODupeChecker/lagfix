@@ -43,6 +43,7 @@ import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.block.BlockSpreadEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.entity.EntityChangeBlockEvent;
+import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerSwapHandItemsEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.event.player.PlayerVelocityEvent;
@@ -79,6 +80,7 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
     private static final String BLOCK_PERSIST_REGIONS_CONFIG_PATH = "block-persist.regions";
     private static final String BLOCK_PERSIST_BLOCKS_CONFIG_PATH = "block-persist.blocks";
     private static final Vector ZERO_VECTOR = new Vector(0, 0, 0);
+    private static final int WIND_CHARGE_COOLDOWN_TICKS = 3 * 20;
 
     private final HashMap<UUID, PacketCounter> packetCounters = new HashMap<>();
     private final Map<String, PersistRegion> persistRegions = new HashMap<>();
@@ -348,6 +350,25 @@ public final class LagFixPlugin extends JavaPlugin implements Listener {
 
         sender.sendMessage(ChatColor.YELLOW + "Usage: /whitelistpickaxe <add|remove> <block>");
         return true;
+    }
+
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onPlayerUseWindCharge(PlayerInteractEvent event) {
+        if (!event.hasItem()) {
+            return;
+        }
+
+        ItemStack item = event.getItem();
+        if (item == null || item.getType() != Material.WIND_CHARGE) {
+            return;
+        }
+
+        Player player = event.getPlayer();
+        int currentCooldown = player.getCooldown(Material.WIND_CHARGE);
+        if (currentCooldown < WIND_CHARGE_COOLDOWN_TICKS) {
+            player.setCooldown(Material.WIND_CHARGE, WIND_CHARGE_COOLDOWN_TICKS);
+        }
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
